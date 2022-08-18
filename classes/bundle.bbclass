@@ -17,6 +17,7 @@
 #   RAUC_SLOT_rootfs ?= "core-image-minimal"
 #   RAUC_SLOT_rootfs[fstype] = "ext4"
 #   RAUC_SLOT_rootfs[hooks] ?= "install;post-install"
+#   RAUC_SLOT_rootfs[incremental] ?= "block-hash-index"
 #   
 #   RAUC_SLOT_kernel ?= "linux-yocto"
 #   RAUC_SLOT_kernel[type] ?= "kernel"
@@ -270,6 +271,8 @@ def write_manifest(d):
             if not have_hookfile:
                 bb.warn("A hook is defined for slot %s, but RAUC_BUNDLE_HOOKS[file] is not defined" % slot)
             manifest.write("hooks=%s\n" % slotflags.get('hooks'))
+        if slotflags and 'incremental' in slotflags:
+            manifest.write("incremental=%s\n" % slotflags.get('incremental'))
         manifest.write("\n")
 
         bundle_imgpath = "%s/%s" % (bundle_path, imgname)
@@ -293,10 +296,30 @@ def write_manifest(d):
 
     manifest.close()
 
+def try_searchpath(file, d):
+    searchpath = d.expand("${DEPLOY_DIR_IMAGE}/%s") % file
+    if os.path.isfile(searchpath):
+        bb.note("adding extra file from deploy dir to bundle dir: '%s'" % file)
+        return searchpath
+    elif os.path.isdir(searchpath):
+        bb.note("adding extra directory from deploy dir to bundle dir: '%s'" % file)
+        return searchpath
+
+    searchpath = d.expand("${WORKDIR}/%s") % file
+    if os.path.isfile(searchpath):
+        bb.note("adding extra file from workdir to bundle dir: '%s'" % file)
+        return searchpath
+    elif os.path.isdir(searchpath):
+        bb.note("adding extra directory from workdir to bundle dir: '%s'" % file)
+        return searchpath
+
+    return None
+
 python do_configure() {
     import shutil
     import os
     import stat
+    import subprocess
 
     write_manifest(d)
 
@@ -313,20 +336,22 @@ python do_configure() {
         os.chmod(dsthook, st.st_mode | stat.S_IEXEC)
 
     for file in (d.getVar('RAUC_BUNDLE_EXTRA_FILES') or "").split():
-        searchpath = d.expand("${DEPLOY_DIR_IMAGE}/%s") % file
+        bundledir = d.getVar('BUNDLE_DIR')
         destpath = d.expand("${BUNDLE_DIR}/%s") % file
-        if os.path.isfile(searchpath):
-            bb.note("adding extra file from deploy dir to bundle dir: '%s'" % file)
-            shutil.copy(searchpath, destpath)
-            continue
 
-        searchpath = d.expand("${WORKDIR}/%s") % file
-        if os.path.isfile(searchpath):
-            bb.note("adding extra file from workdir to bundle dir: '%s'" % file)
-            shutil.copy(searchpath, destpath)
-            continue
+        searchpath = try_searchpath(file, d)
+        if not searchpath:
+            bb.error("extra file '%s' neither found in workdir nor in deploy dir!" % file)
 
-        bb.error("extra file '%s' neither found in workdir nor in deploy dir!" % file)
+        destdir = '.'
+        # strip leading and trailing slashes to prevent installting into wrong location
+        file = file.rstrip('/').lstrip('/')
+
+        if file.find("/") != -1:
+            destdir = file.rsplit("/", 1)[0] + '/'
+            bb.utils.mkdirhier("%s/%s" % (bundledir, destdir))
+        bb.note("Unpacking %s to %s/" % (file, bundledir))
+        ret = subprocess.call('cp -fpPRH "%s" "%s"' % (searchpath, destdir), shell=True, cwd=bundledir)
 }
 
 do_configure[cleandirs] = "${BUNDLE_DIR}"
